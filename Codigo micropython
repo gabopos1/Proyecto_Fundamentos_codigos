@@ -1,0 +1,321 @@
+import network
+import socket
+import time
+from machine import Pin, PWM
+
+#--------------------------------
+# Wifi configuracion (Conectar a la red del telefono de Gabriel)
+#--------------------------------
+
+SSID = "Gabo's Pixel 10 Pro"
+PASSWORD = "holahola"
+
+#--------------------------------
+# Pines
+#--------------------------------
+boton  = Pin(15, Pin.IN, Pin.PULL_DOWN)
+led = Pin('LED', Pin.OUT)
+buzzer = PWM(Pin(5))
+buzzer.freq(200)
+buzzer.duty_u16(0)
+
+CLK_PIN = Pin(27, Pin.OUT)
+DATA_PIN = Pin(26, Pin.OUT)
+LED_FILA1 = Pin(0,  Pin.OUT)
+LED_FILA2 = Pin(1,  Pin.OUT)
+LED_FILA3 = Pin(28, Pin.OUT)
+switch_modo = Pin(10, Pin.IN, Pin.PULL_DOWN)
+
+CLK_PIN.off()
+DATA_PIN.off()
+LED_FILA1.off()
+LED_FILA2.off()
+LED_FILA3.off()
+
+#--------------------------------
+# Tiempos
+#--------------------------------
+TIEMPO_PUNTO_RAYA = 300
+TIEMPO_ESPACIO = 1000
+unidad = 0.2
+
+#--------------------------------
+# Mapa LEDs
+#--------------------------------
+LED_BITS = {
+    1:  1 << 0,   2:  1 << 1,   3:  1 << 2,   4:  1 << 3,
+    5:  1 << 4,   6:  1 << 5,   7:  1 << 6,   8:  1 << 7,
+    9:  1 << 8,  10:  1 << 9,  11:  1 << 10,  12: 1 << 11,
+    13: 1 << 12,
+}
+
+FILA1 = ['A','C','E','G','I','K','M','O','Q','S','U','W','Y']
+FILA2 = ['B','D','F','H','J','L','N','P','R','T','V','X','Z']
+FILA3 = ['0','1','2','3','4','5','6','7','8','9','+','-']
+
+#--------------------------------
+# Morse
+#--------------------------------
+MORSE = {
+    '.-':'A',   '-...':'B', '-.-.':'C', '-..':'D',
+    '.':'E',    '..-.':'F', '--.':'G',  '....':'H',
+    '..':'I',   '.---':'J', '-.-':'K',  '.-..':'L',
+    '--':'M',   '-.':'N',   '---':'O',  '.--.':'P',
+    '--.-':'Q', '.-.':'R',  '...':'S',  '-':'T',
+    '..-':'U',  '...-':'V', '.--':'W',  '-..-':'X',
+    '-.--':'Y', '--..':'Z',
+    '-----':'0', '.----':'1', '..---':'2', '...--':'3',
+    '....-':'4', '.....':'5', '-....':'6', '--...':'7',
+    '---..':'8', '----.':'9', '.-.-.':'+', '-....-':'-',
+}
+
+#--------------------------------
+# Estado global
+#--------------------------------
+codigo_actual   = []
+morse_acumulado = ""
+boton_presionado = False
+boton_inicio_ms  = 0
+pausa_inicio_ms  = 0
+
+#--------------------------------
+# Funciones LEDs
+#--------------------------------
+def shift_out_16(valor):
+    for i in range(15, -1, -1):
+        DATA_PIN.value((valor >> i) & 1)
+        CLK_PIN.on()
+        time.sleep_us(100)
+        CLK_PIN.off()
+        time.sleep_us(100)
+
+def apagar_todo():
+    shift_out_16(0)
+    LED_FILA1.off()
+    LED_FILA2.off()
+    LED_FILA3.off()
+
+def mostrar_caracter(char):
+    char = char.upper()
+    apagar_todo()
+    if char in FILA1:
+        led_num = FILA1.index(char) + 1
+        LED_FILA1.on()
+    elif char in FILA2:
+        led_num = FILA2.index(char) + 1
+        LED_FILA2.on()
+    elif char in FILA3:
+        led_num = FILA3.index(char) + 1
+        LED_FILA3.on()
+    else:
+        print("Simbolo no reconocido:", char)
+        return
+    shift_out_16(LED_BITS.get(led_num, 0))
+    print("Mostrando:", char, "-> LED", led_num)
+
+#-------------------------------
+# Procesar letra morse
+#-------------------------------
+def procesar_letra():
+    global morse_acumulado
+    if not codigo_actual:
+        return
+    clave = ''.join(codigo_actual)
+    letra = MORSE.get(clave, 'desconocido(' + clave + ')')
+    print(' -> ' + letra)
+    codigo_actual.clear()
+    morse_acumulado += clave + " "
+    if 'desconocido' not in letra:
+        mostrar_caracter(letra)
+
+#----------------------------------
+# Leer boton no bloqueante
+#----------------------------------
+def revisar_boton():
+    global boton_presionado, boton_inicio_ms, pausa_inicio_ms
+
+    estado = boton.value()  # 1 = presionado (PULL_DOWN)
+
+    if estado == 1 and not boton_presionado:
+        boton_presionado = True
+        boton_inicio_ms  = time.ticks_ms()
+        led.on()
+        buzzer.duty_u16(15000)
+
+    elif estado == 0 and boton_presionado:
+        boton_presionado = False
+        duracion = time.ticks_diff(time.ticks_ms(), boton_inicio_ms)
+        led.off()
+        buzzer.duty_u16(0)
+        simbolo = '.' if duracion < TIEMPO_PUNTO_RAYA else '-'
+        codigo_actual.append(simbolo)
+        print(simbolo, end='')
+        pausa_inicio_ms = time.ticks_ms()
+
+    elif estado == 0 and not boton_presionado and codigo_actual:
+        if time.ticks_diff(time.ticks_ms(), pausa_inicio_ms) > TIEMPO_ESPACIO:
+            procesar_letra()
+
+# ─────────────────────────────────────────
+# Conectar al wifi
+# ─────────────────────────────────────────
+def conectar_wifi():
+    red = network.WLAN(network.STA_IF)
+    red.active(True)
+    red.connect(SSID, PASSWORD)
+    print("Conectando al WiFi", end="")
+    intentos = 0
+    while not red.isconnected():
+        print(".", end="")
+        time.sleep(0.5)
+        intentos += 1
+        if intentos > 30:
+            print("\nNo se pudo conectar")
+            return None
+    ip = red.ifconfig()[0]
+    print("\nConectado IP: " + ip)
+    return ip
+
+# ─────────────────────────────────────────
+# Servidor HTTP
+# ─────────────────────────────────────────
+def crear_servidor():
+    srv = socket.socket()
+    srv.bind(("", 80))
+    srv.listen(5)
+    srv.setblocking(False)
+    return srv
+
+def responder(cliente, cuerpo, estado="200 OK"):
+    r = (
+        "HTTP/1.1 " + estado + "\r\n"
+        "Content-Type: text/plain\r\n"
+        "Content-Length: " + str(len(cuerpo)) + "\r\n"
+        "\r\n" + cuerpo
+    )
+    cliente.send(r.encode())
+    cliente.close()
+
+def manejar_peticion(cliente):
+    global morse_acumulado, unidad
+    datos = ""
+    try:
+        while "\r\n" not in datos:
+            chunk = cliente.recv(1024).decode()
+            if not chunk:
+                break
+            datos += chunk
+    except:
+        pass
+
+    if not datos:
+        cliente.close()
+        return
+
+    partes = datos.split("\r\n")[0].split(" ")
+    if len(partes) < 2:
+        cliente.close()
+        return
+
+    ruta = partes[1]
+    print("Peticion: " + ruta)
+
+    if ruta in ("/", "/index.html"):
+        responder(cliente, "Servidor Morse activo OK")
+    elif ruta == "/GET_MORSE":
+        responder(cliente, morse_acumulado)
+        morse_acumulado = ""
+    elif ruta == "/LED_ON":
+        led.on()
+        responder(cliente, "OK")
+    elif ruta == "/LED_OFF":
+        led.off()
+        responder(cliente, "OK")
+    elif ruta.startswith("/SET_UNIDAD_"):
+        ms = int(ruta.split("_")[-1])
+        unidad = ms / 1000
+        responder(cliente, "Unidad=" + str(unidad) + "s")
+    elif ruta.startswith("/FRASE_"):
+        frase = ruta[7:]
+        print("Frase recibida: " + frase)
+        transmitir_frase(frase)
+        responder(cliente, "OK")
+    else:
+        responder(cliente, "Ruta no encontrada", "404 Not Found")
+
+# ─────────────────────────────────────────
+# Transmitir frase por LEDs o buzzer
+# ─────────────────────────────────────────
+MORSE_TX = {
+    'A': '.-',   'B': '-...', 'C': '-.-.', 'D': '-..',
+    'E': '.',    'F': '..-.', 'G': '--.',  'H': '....',
+    'I': '..',   'J': '.---', 'K': '-.-',  'L': '.-..',
+    'M': '--',   'N': '-.',   'O': '---',  'P': '.--.',
+    'Q': '--.-', 'R': '.-.',  'S': '...',  'T': '-',
+    'U': '..-',  'V': '...-', 'W': '.--',  'X': '-..-',
+    'Y': '-.--', 'Z': '--..',
+    '1': '.----', '2': '..---', '3': '...--', '4': '....-',
+    '5': '.....', '6': '-....', '7': '--...', '8': '---..',
+    '9': '----.', '0': '-----',
+    '+': '.-.-.', '-': '-....-'
+}
+
+def transmitir_caracter(letra):
+    if letra not in MORSE_TX:
+        return
+    codigo = MORSE_TX[letra]
+    modo = switch_modo.value()
+
+    for simbolo in codigo:
+        if modo == 0:  # luces
+            mostrar_caracter(letra)
+            if simbolo == '.':
+                time.sleep(unidad)
+            else:
+                time.sleep(unidad * 3)
+            apagar_todo()
+        else:  # sonido
+            if simbolo == '.':
+                buzzer.duty_u16(15000)
+                time.sleep(unidad)
+            else:
+                buzzer.duty_u16(15000)
+                time.sleep(unidad * 3)
+            buzzer.duty_u16(0)
+        time.sleep(unidad)
+
+    apagar_todo()
+    time.sleep(unidad * 3)
+
+def transmitir_frase(frase):
+    frase = frase.upper()
+    for char in frase:
+        if char == ' ':
+            time.sleep(unidad * 7)
+        else:
+            transmitir_caracter(char)
+
+# ─────────────────────────────────────────
+# Main
+# ─────────────────────────────────────────
+def main():
+    apagar_todo()
+    ip = conectar_wifi()
+    if ip is None:
+        return
+    servidor = crear_servidor()
+    print("Servidor HTTP listo en http://" + ip)
+    print("Presiona el boton para escribir en Morse...")
+
+    while True:
+        try:
+            cliente, _ = servidor.accept()
+            cliente.setblocking(True)
+            manejar_peticion(cliente)
+        except OSError:
+            pass
+
+        revisar_boton()
+        time.sleep_ms(10)
+
+main()
